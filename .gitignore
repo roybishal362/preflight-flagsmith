@@ -6,3 +6,5 @@ __pycache__/
 .vercel
 .pytest_cache/
 *.egg-info/
+selfhost/.env
+selfhost/.env.local

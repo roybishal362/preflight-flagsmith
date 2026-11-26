@@ -134,3 +134,25 @@ def test_event_names_in_constants_are_resolved(tmp_path):
     assert lint(tmp_path, {"demo_button_clicked"}) == []
     write(tmp_path, "src/App.tsx", (tmp_path / "src/App.tsx").read_text().replace("'demo_button_clicked'", "'Demo_button_clicked'"))
     assert any(f.rule == "PF003" and "case" in f.message for f in lint(tmp_path, {"demo_button_clicked"}))
+
+
+def test_pf006_self_hosted_events_go_to_cloud(tmp_path):
+    write(tmp_path, "src/App.tsx", GOOD_JS.replace("enableEvents: true", "enableEvents: true, api: 'http://localhost:8000/api/v1/'"))
+    assert ("PF006", "error") in rules(lint(tmp_path, {"demo_button_clicked"}))
+    write(tmp_path, "src/App.tsx", GOOD_JS.replace(
+        "enableEvents: true", "enableEvents: true, api: 'http://localhost:8000/api/v1/', eventsApiUrl: 'http://localhost:8000/api/'"))
+    assert lint(tmp_path, {"demo_button_clicked"}) == []
+
+
+def test_pf006_python(tmp_path):
+    write(tmp_path, "svc.py", """
+        from flagsmith import Flagsmith
+        fs = Flagsmith(environment_key='x', api_url='http://flags.internal/api/v1/', enable_events=True)
+        fs.get_experiment_flag('show_demo_button', identifier='u1')
+    """)
+    assert ("PF006", "error") in rules(lint(tmp_path))
+
+
+def test_cloud_api_url_is_not_pf006(tmp_path):
+    write(tmp_path, "src/App.tsx", GOOD_JS.replace("enableEvents: true", "enableEvents: true, api: 'https://edge.api.flagsmith.com/api/v1/'"))
+    assert lint(tmp_path, {"demo_button_clicked"}) == []

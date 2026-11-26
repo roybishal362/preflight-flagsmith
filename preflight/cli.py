@@ -115,8 +115,17 @@ def cmd_smoke(a) -> int:
     print(plan)
     if not confirm("Send this test traffic?", a.yes):
         audit("smoke.declined", flag=a.flag); return 1
-    fs = Flagsmith(environment_key=env_key, enable_events=True,
-                   api_url=os.environ.get("FLAGSMITH_SDK_API_URL") or None)
+    from flagsmith.analytics import EventProcessorConfig
+
+    api_url = os.environ.get("FLAGSMITH_SDK_API_URL") or None
+    events_url = os.environ.get("FLAGSMITH_SDK_EVENTS_URL")
+    if api_url and not events_url and "api.flagsmith.com" not in api_url:
+        # self-hosted: events must go to the same host, not to Flagsmith Cloud (PF006)
+        events_url = api_url.rstrip("/").removesuffix("/v1") + "/"
+    kwargs = {"event_processor_config": EventProcessorConfig(events_api_url=events_url)} if events_url else {}
+    if events_url:
+        print(f"Events URL: {events_url}")
+    fs = Flagsmith(environment_key=env_key, enable_events=True, api_url=api_url, **kwargs)
     seen: dict[str, int] = {}
     converted = 0
     t0 = time.time()
@@ -282,15 +291,46 @@ def cmd_apply(a) -> int:
     return 0
 
 
+def cmd_selfhost(a) -> int:
+    import subprocess
+
+    from .selfhost import bootstrap_from_files, make_env_example
+
+    folder = Path(a.folder)
+    if a.action == "up":
+        make_env_example(folder / ".env")
+        print("Starting self-hosted Flagsmith (first run downloads the images)…")
+        r = subprocess.run(["docker", "compose", "up", "-d"], cwd=folder)
+        if r.returncode:
+            return r.returncode
+        a.action = "bootstrap"
+    if a.action == "bootstrap":
+        res = bootstrap_from_files(folder)
+        audit("selfhost.bootstrap", project=res["project"], environments=list(res["environments"]))
+        print(c("\n✓ Self-hosted Flagsmith is ready for experiments.", "32;1"))
+        print(f"  Dashboard: http://localhost:8000   Config: {folder / '.env.local'}\n"
+              f"  Use it:    preflight --env-file {folder / '.env.local'} check")
+        return 0
+    if a.action == "down":
+        return subprocess.run(["docker", "compose", "down"] + (["-v"] if a.wipe else []), cwd=folder).returncode
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):  # Windows consoles default to cp1252
         try:
             stream.reconfigure(encoding="utf-8", errors="replace")  # type: ignore[attr-defined]
         except (AttributeError, ValueError):
             pass
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if "--env-file" in argv:  # load a specific config first (e.g. selfhost/.env.local); it wins over .env
+        i = argv.index("--env-file")
+        load_dotenv(Path(argv[i + 1]))
+        del argv[i:i + 2]
     load_dotenv()
     p = argparse.ArgumentParser(prog="preflight", description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--version", action="version", version=f"preflight {__version__}")
+    p.add_argument("--env-file", help="load settings from this file first (e.g. selfhost/.env.local)")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("lint", help="static checks on your code")
@@ -326,6 +366,12 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--start", action="store_true", help="also start the experiment")
     s.add_argument("--yes", action="store_true")
     s.set_defaults(fn=cmd_apply)
+
+    s = sub.add_parser("selfhost", help="run and bootstrap a self-hosted Flagsmith with Experimentation")
+    s.add_argument("action", choices=["up", "bootstrap", "down"])
+    s.add_argument("--folder", default="selfhost")
+    s.add_argument("--wipe", action="store_true", help="with down: also delete the database volume")
+    s.set_defaults(fn=cmd_selfhost)
 
     s = sub.add_parser("smoke", help="drive synthetic users through the real SDK")
     s.add_argument("--flag", required=True)

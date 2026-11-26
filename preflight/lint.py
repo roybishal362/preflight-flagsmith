@@ -84,6 +84,14 @@ PY_EVENTS_ON = re.compile(r"\benable_events\s*=\s*True\b")
 PY_FLUSH = re.compile(r"\b(flush_events|close)\s*\(|max_buffer_items\s*=\s*1\b")
 PY_SCRIPT = re.compile(r"if\s+__name__\s*==\s*['\"]__main__['\"]")
 
+# PF006: both SDKs send events to https://events.api.flagsmith.com/ by default, even when the flags API is
+# pointed at a self-hosted instance (verified in @flagsmith/flagsmith 12.6 `eventsApiUrl` and Python
+# flagsmith 6.7 `EventProcessorConfig(events_api_url=...)`).
+JS_CUSTOM_API = re.compile(r"\bapi\s*:\s*(?!['\"`]?https://(?:edge\.)?api\.flagsmith\.com)[^,}\s][^,}\n]*")
+JS_EVENTS_URL = re.compile(r"\beventsApiUrl\s*:")
+PY_CUSTOM_API = re.compile(r"\bapi_url\s*=\s*(?!['\"]https://(edge\.)?api\.flagsmith\.com)[^,)\n]+")
+PY_EVENTS_URL = re.compile(r"\bevents_api_url\s*=")
+
 
 def iter_sources(root: Path) -> list[SourceFile]:
     files: list[SourceFile] = []
@@ -177,6 +185,13 @@ def lint(root: Path, metric_events: set[str] | None = None) -> list[Finding]:
                                         f"`{m.group(1)}('{flag}')` is called but the user is never identified. "
                                         "Exposures are only recorded for identified users.",
                                         "Call `await flagsmith.identify(<stable user or visitor id>)` before reading the flag."))
+        custom = JS_CUSTOM_API.search(f.text)
+        if custom and JS_EVENTS_ON.search(f.text) and not JS_EVENTS_URL.search(f.text):
+            findings.append(Finding("PF006", "error", str(f.path), f.line_of(custom.start()),
+                                    "Flags come from a custom/self-hosted API, but events still go to Flagsmith Cloud "
+                                    "(the SDK's events URL defaults to https://events.api.flagsmith.com/). "
+                                    "Your instance will record no exposures or conversions.",
+                                    "Also pass `eventsApiUrl: '<your host>/api/'` to init()."))
         if JS_NODE_CLIENT.search(f.text) and JS_EVENTS_ON.search(f.text) and not JS_FLUSH.search(f.text):
             m = JS_NODE_CLIENT.search(f.text)
             findings.append(Finding("PF004", "warning", str(f.path), f.line_of(m.start()),
@@ -192,6 +207,13 @@ def lint(root: Path, metric_events: set[str] | None = None) -> list[Finding]:
             if name:
                 tracked.append((name, f, f.line_of(m.start())))
         calls = list(PY_EXPERIMENT_CALL.finditer(f.text))
+        custom = PY_CUSTOM_API.search(f.text)
+        if has_client and custom and events_on and not PY_EVENTS_URL.search(f.text):
+            findings.append(Finding("PF006", "error", str(f.path), f.line_of(custom.start()),
+                                    "Flags come from a custom/self-hosted API, but events still go to Flagsmith Cloud "
+                                    "(EventProcessorConfig.events_api_url defaults to https://events.api.flagsmith.com/). "
+                                    "Your instance will record no exposures or conversions.",
+                                    "Pass event_processor_config=EventProcessorConfig(events_api_url='<your host>/api/')."))
         if has_client and (calls or PY_TRACK.search(f.text)) and not events_on:
             findings.append(Finding("PF001", "error", str(f.path), f.line_of(has_client.start()),
                                     "Flagsmith client is created without `enable_events=True`. "

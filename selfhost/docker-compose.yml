@@ -1,0 +1,71 @@
+# Self-hosted Flagsmith with Experimentation, ready for Preflight.
+# Based on the official compose file (github.com/Flagsmith/flagsmith/blob/main/docker-compose.yml, fetched 2026-11-26)
+# with one change: secrets come from selfhost/.env instead of being hard-coded.
+#
+#   cd selfhost && cp .env.example .env      # set real secrets
+#   docker compose up -d
+#   preflight selfhost bootstrap             # admin, org, project, environments, warehouse, API key
+#
+# Dashboard and API: http://localhost:8000   Task processor: http://localhost:8001
+# Experimentation uses the "Flagsmith database" warehouse (Postgres): fine for evaluation and demos.
+# For production volume, Flagsmith recommends its own ingestion service + Kafka + ClickHouse/Databricks.
+
+volumes:
+  pgdata:
+
+x-flagsmith-env: &flagsmith-env
+  DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in selfhost/.env}@postgres:5432/flagsmith
+  USE_POSTGRES_FOR_ANALYTICS: "true"
+  ENVIRONMENT: production
+  DJANGO_ALLOWED_HOSTS: "*"
+  FLAGSMITH_DOMAIN: localhost:8000
+  DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:?set DJANGO_SECRET_KEY in selfhost/.env}
+  WAREHOUSE_CREDENTIALS_SECRET: ${WAREHOUSE_CREDENTIALS_SECRET:?set WAREHOUSE_CREDENTIALS_SECRET in selfhost/.env}
+  TASK_RUN_METHOD: TASK_PROCESSOR
+  PROMETHEUS_ENABLED: "true"
+  EXPERIMENTATION_ENABLED: "true"
+
+services:
+  postgres:
+    image: postgres:15.5-alpine
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: flagsmith
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -d flagsmith -U postgres"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+    restart: unless-stopped
+
+  migrate-db:
+    image: docker.flagsmith.com/flagsmith/flagsmith:${FLAGSMITH_TAG:-latest}
+    command: migrate
+    environment: *flagsmith-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  flagsmith:
+    image: docker.flagsmith.com/flagsmith/flagsmith:${FLAGSMITH_TAG:-latest}
+    command: serve
+    environment: *flagsmith-env
+    ports:
+      - "8000:8000"
+    depends_on:
+      migrate-db:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  flagsmith-task-processor:
+    image: docker.flagsmith.com/flagsmith/flagsmith:${FLAGSMITH_TAG:-latest}
+    command: run-task-processor
+    environment: *flagsmith-env
+    ports:
+      - "8001:8000"
+    depends_on:
+      migrate-db:
+        condition: service_completed_successfully
+    restart: unless-stopped

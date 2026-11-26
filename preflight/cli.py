@@ -380,12 +380,26 @@ def cmd_ship(a) -> int:
     print(f"  Call    : POST environments/{env_key[:6]}…/experiments/{exp['id']}/complete/ {json.dumps(sp.body())}")
     if not confirm("Complete the experiment and ship this decision?", a.yes):
         audit("ship.declined", experiment=a.experiment_id); return 1
-    res = ship(api, env_key, sp)
+    res = ship(api, env_key, sp, api_url=os.environ.get("FLAGSMITH_SDK_API_URL") or None)
     audit("ship.done", experiment=a.experiment_id, decision=sp.decision, variant=sp.variant_key,
           overridden=sp.overridden, reason=sp.reason, result=res)
     print(c(f"✓ Shipped. Flagsmith now reports status={res['status']}, decision={res['rollout_decision']}"
             + (f", variant id {res['rollout_variant']}" if res.get("rollout_variant") else "")
             + f", ended {res['ended_at']}.", "32;1"))
+    served, want = res.get("served"), res.get("expected_value")
+    if served:
+        ident = served["identified"]
+        total = sum(ident.values())
+        good = ident.get(want, 0) if want else 0
+        mark = "✓" if want and good == total else "✗"
+        print(c(f"{mark} Verified: {good}/{total} brand-new identified users now get '{want}' ({ident}).",
+                "32;1" if mark == "✓" else "31;1"))
+        if want and served["unidentified"] != want:
+            print(c(f"! Unidentified requests still get '{served['unidentified']}'. If any part of your app evaluates "
+                    f"this flag without identifying the user, also set the flag's value to '{want}' "
+                    "(Features > flag > Value), then clean up the flag.", "33;1"))
+    elif res.get("served_error"):
+        print(c(f"? Could not verify what users are served: {res['served_error']}", "33"))
     return 0
 
 

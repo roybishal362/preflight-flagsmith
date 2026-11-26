@@ -47,7 +47,7 @@ def test_winner_ships_that_variant_by_option_id():
     sp = plan_ship(api, "env", 2)
     assert sp.allowed and sp.decision == "variant" and sp.variant_key == "variant_b"
     assert sp.body() == {"rollout_decision": "variant", "rollout_variant": 77}
-    res = ship(api, "env", sp)
+    res = ship(api, "env", sp, verify=None)
     assert api.posted == [("environments/env/experiments/2/complete/", {"rollout_decision": "variant", "rollout_variant": 77})]
     assert res["status"] == "completed" and res["rollout_variant"] == 77
 
@@ -87,3 +87,10 @@ def test_unknown_variant_and_completed_experiment():
 def test_too_little_data_never_ships_even_with_high_win_probability():
     tiny = results(20, 2, 20, 9, 0.99, 0.5, 4.0)
     assert not plan_ship(FakeAPI(tiny), "env", 2).allowed
+
+
+def test_expected_value_after_ship():
+    from preflight.ship import expected_value
+    assert expected_value(plan_ship(FakeAPI(WIN), "env", 2)) == "treatment"
+    exp = {**EXP, "feature": {**EXP["feature"], "initial_value": "control"}}
+    assert expected_value(plan_ship(FakeAPI(LOSE, exp), "env", 2)) == "control"

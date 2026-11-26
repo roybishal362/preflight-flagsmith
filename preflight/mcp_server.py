@@ -200,7 +200,7 @@ def preflight_ship(experiment_id: int, environment: str | None = None) -> dict[s
     if not sp.allowed:
         audit("mcp.ship.refused", experiment=experiment_id, reason=sp.reason)
         return {"shipped": False, "reason": sp.reason, "verdict": sp.verdict.as_dict()}
-    res = ship(api, env, sp)
+    res = ship(api, env, sp, api_url=os.environ.get("FLAGSMITH_SDK_API_URL") or None)
     audit("mcp.ship.done", experiment=experiment_id, decision=sp.decision, variant=sp.variant_key, result=res)
     return {"shipped": True, "decision": sp.decision, "variant": sp.variant_key, "flagsmith": res}
 

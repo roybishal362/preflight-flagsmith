@@ -80,11 +80,47 @@ def plan_ship(api: FlagsmithAdmin, env: str, exp_id: int, override: str | None =
                     "--decision and --reason.")
 
 
-def ship(api: FlagsmithAdmin, env: str, plan: ShipPlan) -> dict:
+def expected_value(plan: ShipPlan) -> str | None:
+    """The flag value users should get after shipping."""
+    feature = plan.experiment.get("feature") or {}
+    if plan.decision == "variant":
+        opt = next((o for o in feature.get("multivariate_options") or [] if o.get("id") == plan.variant_id), {})
+        return str(opt.get("string_value"))
+    if plan.decision == "control":
+        return str(feature.get("initial_value", "control"))
+    return None
+
+
+def verify_served(env: str, flag: str, n: int = 20, api_url: str | None = None) -> dict:
+    """Ask Flagsmith what brand-new identified users, and an unidentified request, are served now.
+    Verified live (self-hosted, 2026-11-26): after shipping a variant, identified users got the winner but the
+    environment-level (unidentified) evaluation still returned the old value."""
+    import uuid
+
+    from flagsmith import Flagsmith
+
+    fs = Flagsmith(environment_key=env, api_url=api_url)
+    served: dict[str, int] = {}
+    for _ in range(n):
+        f = fs.get_identity_flags(f"preflight_verify_{uuid.uuid4().hex[:10]}").get_flag(flag)
+        key = str(f.value) if f.enabled else "(disabled)"
+        served[key] = served.get(key, 0) + 1
+    e = fs.get_environment_flags().get_flag(flag)
+    return {"identified": served, "unidentified": str(e.value) if e.enabled else "(disabled)"}
+
+
+def ship(api: FlagsmithAdmin, env: str, plan: ShipPlan, verify=verify_served, api_url: str | None = None) -> dict:
     if not plan.allowed or not plan.decision:
         raise RuntimeError("This ship plan is not allowed.")
     exp_id = plan.experiment["id"]
     api.post(f"environments/{env}/experiments/{exp_id}/complete/", plan.body())
     after = api.experiment(env, exp_id)  # read back: never report success we didn't observe
-    return {"status": after.get("status"), "rollout_decision": after.get("rollout_decision"),
-            "rollout_variant": after.get("rollout_variant"), "ended_at": after.get("ended_at")}
+    out = {"status": after.get("status"), "rollout_decision": after.get("rollout_decision"),
+           "rollout_variant": after.get("rollout_variant"), "ended_at": after.get("ended_at"),
+           "expected_value": expected_value(plan)}
+    if verify:
+        try:
+            out["served"] = verify(env, (plan.experiment.get("feature") or {}).get("name"), api_url=api_url)
+        except Exception as e:  # verification is a check, never a reason to hide the ship result
+            out["served_error"] = str(e)
+    return out

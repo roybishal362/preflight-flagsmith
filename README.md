@@ -7,7 +7,9 @@ winner too early.**
 Built for *Toggle Wars: The Flagsmith Experimentation Hackathon* (WeMakeDevs × Flagsmith, Nov 26–29 2026).
 
 - Live page running a real Flagsmith experiment: **https://preflight-flagsmith.vercel.app**
-- CLI: `preflight lint | check | plan | apply | smoke | verdict`
+- CLI: `preflight lint | check | plan | apply | smoke | verdict | selfhost`
+- GitHub Action: fail a PR that would make an experiment record nothing
+- Self-hosted Flagsmith with Experimentation in one command: [`selfhost/`](selfhost/README.md)
 - MCP server: the same tools for Claude Code, Cursor or any MCP agent, with human approval on every change
 
 ---
@@ -51,6 +53,7 @@ it would have recorded nothing for half the traffic. Every failure mode in the t
 | PF003 | Event names vs. metric events: case mismatch, unknown event, metric never tracked (constants are resolved) |
 | PF004 | Events enabled in a short-lived script that never flushes or closes |
 | PF005 | `@flagsmith/flagsmith` < 12.4.0, `@flagsmith/nodejs` < 9.1.0, legacy `flagsmith-nodejs`, Python `flagsmith` < 6.3.0 |
+| PF006 | Flags come from a self-hosted API but events still go to Flagsmith Cloud (both SDKs default the events URL to `events.api.flagsmith.com`) |
 | PF101 | No warehouse connection, or a broken one |
 | PF102 | A variation without a key; a flag that isn't multivariate |
 | PF103 | Experiment created but not running |
@@ -107,6 +110,23 @@ claude mcp add preflight -- python -m preflight.mcp_server   # Claude Code; run 
 Then, for example: *"Set up an experiment on `checkout_button` testing 'Pay now' vs 'Buy', measured by
 `checkout_completed`, and check my code in ./app first."* The agent calls `preflight_plan`, shows the steps, and
 waits for your OK before `preflight_apply`.
+
+## In CI (GitHub Action)
+
+```yaml
+- uses: roybishal362/preflight-flagsmith@main
+  with:
+    path: web
+    events: demo_button_clicked,signup_completed
+```
+
+This repo's own CI runs it on the demo page on every push.
+
+## Self-hosted Flagsmith
+
+`preflight selfhost up` starts open-source Flagsmith with Experimentation in Docker and bootstraps it through the API
+(admin, organisation, project, environments, warehouse, API key), idempotently. Every Preflight command then works
+against it with `--env-file selfhost/.env.local`. Details and verified results: [`selfhost/README.md`](selfhost/README.md).
 
 ## How Flagsmith is used
 
@@ -178,9 +198,18 @@ Demo page: `cd web && cp .env.example .env` (client-side environment key), then 
 ## Tests
 
 ```bash
-python -m pytest -q          # 21 unit tests; platform tests use payloads captured from live Flagsmith
+python -m pytest -q          # 25 unit tests; platform tests use payloads captured from live Flagsmith
 python scripts/mcp_e2e.py    # MCP protocol end-to-end against live Flagsmith (read-only)
 ```
+
+## Limitations
+
+- `lint` uses patterns, not a full parser. It resolves simple constants and ignores strings and comments, but it can
+  miss calls built dynamically (for example an event name assembled at runtime) or wrapped in your own helper.
+- `check` and `verdict` rely on Experimentation API shapes captured from Flagsmith Cloud and self-hosted on
+  2026-11-26. Experimentation is in beta, so these may change; the tests pin the shapes we saw.
+- `plan` handles string-valued variations and one primary metric.
+- The self-hosted kit uses the Flagsmith-database warehouse, which Flagsmith positions for evaluation, not production volume.
 
 ## Status
 

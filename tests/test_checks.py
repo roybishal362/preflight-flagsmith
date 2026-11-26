@@ -90,3 +90,37 @@ def test_parse_real_inference_and_judge():
     assert abs(b.ci_low + 0.7467) < 1e-3 and abs(b.ci_high + 0.0559) < 1e-3
     v = judge(arms)
     assert v.status == "loser" and v.ship == "control"
+
+
+# ---------------- runtime checks on live data (PF105, PF106) ----------------
+from datetime import datetime, timezone
+
+from preflight.checks import runtime_findings
+
+NOW = datetime(2026, 11, 26, 18, 0, tzinfo=timezone.utc)
+RUNNING = {"id": 1, "name": "Signup copy", "status": "running", "started_at": "2026-11-26T16:00:00Z",
+           "metrics": [{"metric": 9}]}
+METRICS = [{"id": 9, "definition": {"event": "signup_completed"}}]
+
+
+def test_case_mismatch_detected_from_live_events():
+    found = runtime_findings([RUNNING], METRICS, {"$flag_exposure", "Signup_Completed"}, False, "fs", NOW)
+    assert [(f.rule, f.severity) for f in found] == [("PF105", "error")]
+    assert "Signup_Completed" in found[0].message
+
+
+def test_no_exposures_after_quiet_period():
+    found = runtime_findings([RUNNING], METRICS, {"signup_completed"}, False, "fs", NOW)
+    assert ("PF106", "error") in {(f.rule, f.severity) for f in found}
+
+
+def test_healthy_and_too_early_are_quiet():
+    assert runtime_findings([RUNNING], METRICS, {"$flag_exposure", "signup_completed"}, False, "fs", NOW) == []
+    fresh = {**RUNNING, "started_at": "2026-11-26T17:55:00Z"}
+    assert runtime_findings([fresh], METRICS, set(), False, "fs", NOW) == []
+
+
+def test_unknown_event_list_or_truncated_list_never_guesses():
+    assert runtime_findings([RUNNING], METRICS, None, False, "fs", NOW) == []
+    assert all(f.severity == "error" and "Signup" in f.message
+               for f in runtime_findings([RUNNING], METRICS, {"Signup_Completed"}, True, "fs", NOW))

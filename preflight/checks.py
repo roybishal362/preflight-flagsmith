@@ -1,6 +1,7 @@
 """Checks that need the Flagsmith Admin API, plus results normalisation."""
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any
 
 from .api import FlagsmithAdmin
@@ -76,9 +77,79 @@ def check_environment(api: FlagsmithAdmin, env_key: str) -> tuple[list[Finding],
                                     f"'{name}' exists but is not running (status '{status}').",
                                     "Start it once the smoke test passes."))
 
-    ctx = {"warehouse_connections": len(conns), "metrics": events, "experiments": [
-        {"id": e.get("id"), "name": e.get("name"), "status": e.get("status")} for e in experiments]}
+    received, truncated = _received_events(api, env_key, conns)
+    findings.extend(runtime_findings(experiments, metrics, received, truncated, where))
+
+    ctx = {"warehouse_connections": len(conns), "metrics": events,
+           "events_received": sorted(received) if received is not None else None,
+           "experiments": [{"id": e.get("id"), "name": e.get("name"), "status": e.get("status")} for e in experiments]}
     return findings, ctx
+
+
+EXPOSURE_EVENT = "$flag_exposure"  # verified: the event name exposures arrive under (Cloud and self-hosted)
+
+
+def _received_events(api: FlagsmithAdmin, env_key: str, conns: list[dict]) -> tuple[set[str] | None, bool]:
+    """Distinct event names the warehouse has actually received (GET .../warehouse-connections/{id}/events/).
+    Returns (None, False) when the warehouse can't list them (HTTP 400/503 per the OpenAPI schema)."""
+    if not conns:
+        return None, False
+    try:
+        res = api.get(f"environments/{env_key}/warehouse-connections/{conns[0]['id']}/events/")
+    except Exception:
+        return None, False
+    return set(res.get("events") or []), bool(res.get("is_truncated"))
+
+
+def _minutes_since(ts: str | None, now: datetime | None = None) -> float | None:
+    if not ts:
+        return None
+    try:
+        t = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return ((now or datetime.now(timezone.utc)) - t).total_seconds() / 60
+
+
+def runtime_findings(experiments: list[dict], metrics: list[dict], received: set[str] | None, truncated: bool,
+                     where: str, now: datetime | None = None, quiet_minutes: float = 30) -> list[Finding]:
+    """Checks on live data, no code needed:
+    PF106 a running experiment, but the environment has never received a single exposure
+    PF105 a metric's event never arrived, or arrived under a different spelling (case)."""
+    out: list[Finding] = []
+    if received is None:
+        return out
+    by_id = {m.get("id"): (m.get("definition") or {}).get("event") for m in metrics}
+    lower = {e.casefold(): e for e in received if e != EXPOSURE_EVENT}
+    for exp in experiments:
+        if str(exp.get("status", "")).lower() != "running":
+            continue
+        name = exp.get("name")
+        age = _minutes_since(exp.get("started_at"), now)
+        old_enough = age is not None and age >= quiet_minutes
+        if EXPOSURE_EVENT not in received and old_enough and not truncated:
+            out.append(Finding("PF106", "error", where, 0,
+                               f"'{name}' has been running for {age:.0f} min, but this environment has never received "
+                               "an exposure. Usual causes: events not enabled, users not identified, or a self-hosted "
+                               "app sending events to Flagsmith Cloud.",
+                               "Run `preflight lint` on the app, then `preflight smoke` against a test environment."))
+        for em in exp.get("metrics") or []:
+            ev = by_id.get(em.get("metric"))
+            if not ev or ev in received:
+                continue
+            twin = lower.get(ev.casefold())
+            if twin:
+                out.append(Finding("PF105", "error", where, 0,
+                                   f"'{name}': the metric counts '{ev}', but the app is sending '{twin}'. "
+                                   "Event names are case-sensitive, so every conversion is being ignored right now.",
+                                   f"Change the app to send '{ev}' (or the metric to count '{twin}')."))
+            elif old_enough and not truncated:
+                seen = ", ".join(sorted(lower.values())[:5]) or "none"
+                out.append(Finding("PF105", "warning", where, 0,
+                                   f"'{name}': no '{ev}' event has arrived in {age:.0f} min of running. "
+                                   f"Other events received: {seen}.",
+                                   "If users should have converted by now, check the event name and where it is tracked."))
+    return out
 
 
 def _ratio(x: Any) -> float | None:

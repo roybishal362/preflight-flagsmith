@@ -125,6 +125,11 @@ def cmd_smoke(a) -> int:
     kwargs = {"event_processor_config": EventProcessorConfig(events_api_url=events_url)} if events_url else {}
     if events_url:
         print(f"Events URL: {events_url}")
+    # Ingestion proof. A global counter can't be attributed to this run (we saw a stale read turn another run's
+    # events into a false "received"), so each run also sends one uniquely named probe event through the same
+    # pipeline and we look for that exact name in the warehouse's received-event list.
+    probe = f"preflight_probe_{run}"
+    watcher = _IngestionWatcher.create(env_key)
     fs = Flagsmith(environment_key=env_key, enable_events=True, api_url=api_url, **kwargs)
     seen: dict[str, int] = {}
     converted = 0
@@ -137,16 +142,73 @@ def cmd_smoke(a) -> int:
         if (i * 7919) % 100 < a.rate * 100:  # deterministic spread, no randomness in tests
             fs.track_event(a.event, identifier=ident)
             converted += 1
+    fs.track_event(probe, identifier=f"preflight_smoke_{run}_0")
     fs.close()
     audit("smoke.sent", flag=a.flag, event=a.event, identities=a.n, conversions=converted, run=run, variants=seen)
     print(f"Sent in {time.time() - t0:.1f}s. Variants served: {seen}. Conversions sent: {converted}.")
+    ok = True
     if len(seen) < 2:
         print(c("✗ Only one variant was served. The flag is not splitting traffic (experiment not running, "
-                "weights at 0, or flag disabled).", "31;1")); return 1
-    print(c("✓ Bucketing works. Now run `preflight verdict <id> --refresh` in ~1 minute to confirm Flagsmith "
-            "ingested the exposures.", "32"))
-    return 0
+                "weights at 0, or flag disabled).", "31;1"))
+        ok = False
+    else:
+        print(c(f"✓ Bucketing: every arm was served ({seen}).", "32"))
 
+    if watcher is None:
+        print(c("? Ingestion not verified: set FLAGSMITH_API_KEY so Preflight can read the warehouse.", "33"))
+        return 0 if ok else 1
+    print(f"Verifying Flagsmith received this run's events (probe '{probe}', up to {a.verify_timeout}s)…")
+    arrived, waited = watcher.wait_for(probe, a.verify_timeout)
+    audit("smoke.ingestion", run=run, probe=probe, arrived=arrived, waited=round(waited))
+    if arrived:
+        print(c(f"✓ Ingestion: this run's events reached the Flagsmith warehouse ({waited:.0f}s). "
+                "This experiment records data end to end.", "32;1"))
+    else:
+        hint = (" Flags come from your own server but events go to Flagsmith Cloud (PF006): set the events URL."
+                if events_url and "events.api.flagsmith.com" in events_url and api_url else
+                " Check that events are enabled and the SDK points at the right events URL.")
+        print(c(f"✗ Ingestion: this run's events never reached the warehouse in {a.verify_timeout}s. "
+                f"Flags work, but nothing is being recorded.{hint}", "31;1"))
+        ok = False
+    return 0 if ok else 1
+
+
+class _IngestionWatcher:
+    """Proves a smoke run's events reached the warehouse by waiting for that run's uniquely named probe event in
+    the environment's received-event list (GET .../warehouse-connections/{id}/events/). The warehouse's
+    total_events_received counter is not used: live tests showed it lagging by a whole run, which would have
+    credited one run's events to the next."""
+
+    def __init__(self, api, env_key: str, conn_id: int):
+        self.api, self.env_key, self.conn_id = api, env_key, conn_id
+
+    @classmethod
+    def create(cls, env_key: str):
+        if not os.environ.get("FLAGSMITH_API_KEY"):
+            return None
+        try:
+            from .api import FlagsmithAdmin
+
+            api = FlagsmithAdmin()
+            conns = api.warehouse_connections(env_key)
+            return cls(api, env_key, conns[0]["id"]) if conns else None
+        except Exception:
+            return None
+
+    def _names(self) -> set[str]:
+        try:
+            res = self.api.get(f"environments/{self.env_key}/warehouse-connections/{self.conn_id}/events/")
+            return set(res.get("events") or [])
+        except Exception:
+            return set()
+
+    def wait_for(self, probe: str, timeout: int) -> tuple[bool, float]:
+        t0 = time.time()
+        while time.time() - t0 < timeout:
+            if probe in self._names():
+                return True, time.time() - t0
+            time.sleep(5)
+        return False, time.time() - t0
 
 def cmd_verdict(a) -> int:
     from .api import FlagsmithAdmin
@@ -381,6 +443,7 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--rate", type=float, default=0.3)
     s.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     s.add_argument("--allow-live", action="store_true")
+    s.add_argument("--verify-timeout", type=int, default=120, help="seconds to wait for Flagsmith to ingest events")
     s.set_defaults(fn=cmd_smoke)
 
     s = sub.add_parser("verdict", help="honest go / no-go on results")

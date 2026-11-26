@@ -1,85 +1,84 @@
-# Demo video script (target 2:45, hard limit 3:00)
+# Demo video script (target 2:50, hard limit 3:00)
 
-Judging asks the video to show: the problem, what was built, and how Flagsmith fits in.
-Record at 1920×1080, terminal font 18pt+, dark theme. Speak slowly; captions are fine.
+The judges score the video on: the problem, what was built, and how Flagsmith fits in.
+Record at 1920×1080 with a terminal font of 18pt or larger. Talk slowly. Every command below has already been run
+live; the outputs you will see are real.
 
-## Before recording (10 min)
+## Before recording (15 min)
 
-1. Open these, each in its own tab or window, in this order:
-   - Tab 1: https://preflight-flagsmith.vercel.app
-   - Tab 2: Flagsmith dashboard → Experiments (Development) → "Demo button text test"
-   - Tab 3: GitHub repo README
-   - Terminal in `e:\falgsmith\preflight` with `.venv` active, cleared (`cls`)
-2. Make the broken demo app (shown in scene 2): `python scripts/make_broken_demo.py` creates `demo_broken/`.
-3. Run each command once off-camera so nothing is slow on camera.
+1. `cd e:\falgsmith\preflight`, activate `.venv`, run `cls`.
+2. `docker compose -f selfhost/docker-compose.yml ps` should show 4 healthy services. If not: `preflight selfhost up`.
+3. `python scripts/make_broken_demo.py` creates `demo_broken/`.
+4. Open browser tabs: (1) https://preflight-flagsmith.vercel.app (2) Flagsmith dashboard, Experiments
+   (3) the GitHub README (4) `docs/agent-transcript.md` on GitHub.
+5. Run every command once off-camera so nothing is slow on camera.
 
-## Scene 1 — The problem (0:00–0:30)
+## 0:00–0:25 The problem
 
-**Show:** the live page (Tab 1), then the Flagsmith experiment page (Tab 2).
+**Show:** the live page, then the Flagsmith experiment page.
 
-**Say:**
-"This page is running a real Flagsmith experiment right now: two button labels, 50/50, and a click is the
-conversion. Flagsmith Experimentation is great, but an experiment can look perfect in this dashboard and still record
-nothing. Events not enabled, a user never identified, an event name off by one capital letter, a variation without a
-key. None of these throw an error. You find out days later. While building this, we hit one ourselves."
+**Say:** "This page runs a real Flagsmith experiment. Flagsmith Experimentation is powerful, but an experiment can
+look perfect in this dashboard and still record nothing: events not enabled, a user never identified, an event name
+off by one capital letter, a variation without a key. None of these raise an error. While building this we hit four
+of them ourselves. So we built Preflight."
 
-## Scene 2 — Catch it before launch (0:30–1:05)
-
-**Show:** terminal.
+## 0:25–0:55 Round 1 and 2: plan safely, check the code
 
 ```
 preflight lint demo_broken --event demo_button_clicked
-```
-
-**Say:** "Preflight reads your code. Here it finds events never enabled, the flag read before identify, and an event
-named with the wrong case. Each would have silently killed the experiment."
-
-```
-preflight lint web --event demo_button_clicked
-```
-
-**Say:** "Our real page: clean."
-
-## Scene 3 — Set up an experiment safely (1:05–1:45)
-
-**Show:** terminal.
-
-```
 preflight plan --name "Second test" --flag show_demo_button --variant variant_c --event Demo_Button_Clicked --hypothesis "A shorter label increases demo button clicks" --code web
 ```
 
-**Say:** "Planning is read-only. Against the live Flagsmith project it blocks this for three reasons: the flag already
-has a running experiment, Flagsmith only allows one, the event name clashes in case with an existing metric, and our
-code doesn't send that spelling. Nothing was sent."
+**Say:** "Lint reads the code: events never enabled, a flag read before identify, a wrong-case event. Each would kill
+the experiment silently. Plan is read-only. Against live Flagsmith it blocks this experiment for three reasons and
+sends nothing. When a plan is clean, apply re-checks Flagsmith, asks me, and logs every call."
 
-Then show the README "Live evidence" row about `apply` and say:
-"When a plan is clean, apply re-reads Flagsmith, refuses if anything changed since you reviewed it, asks you, and
-logs every call. We used it to create and start a real experiment; when Flagsmith's API rejected a call the docs
-don't mention, it stopped, told us exactly what existed, and resumed cleanly."
-
-## Scene 4 — Proof the data arrives, and an honest verdict (1:45–2:20)
+## 0:55–1:30 Round 3: prove the data arrives
 
 ```
-preflight verdict 697 --environment <production key>
+preflight --env-file selfhost/.env.local smoke --flag preflight_smoke_test --event smoke_converted -n 60 --yes
+set FLAGSMITH_SDK_EVENTS_URL=https://events.api.flagsmith.com/
+preflight --env-file selfhost/.env.local smoke --flag preflight_smoke_test --event smoke_converted -n 30 --yes --verify-timeout 30
+set FLAGSMITH_SDK_EVENTS_URL=
+```
+
+**Say:** "Smoke sends synthetic users through the real SDK into a test environment and proves this run's events
+reached the warehouse. This is a self-hosted Flagsmith. In the second run the events go to Flagsmith Cloud, the SDK
+default. The flags still work, so nobody notices, but nothing is recorded. Preflight catches it: rule PF006. Our own
+browser fix for this was silently ignored, because the JavaScript SDK only reads the events URL inside
+eventProcessorConfig. That is now a check too."
+
+## 1:30–2:05 Round 4: an honest verdict, then ship
+
+```
 preflight verdict 692
+preflight --env-file selfhost/.env.local ship 1 --environment <self-host Production key> --yes
 ```
 
-**Say:** "Smoke test: 120 synthetic users through the real SDK into a separate environment. Flagsmith counted exactly
-the 63 and 57 users and 37 conversions we sent. The verdict uses Flagsmith's own Bayesian results and thresholds:
-here, control wins with a credible interval clear of zero. On the real experiment it says: not enough data yet,
-don't call a winner. It will never crown a winner from 84% and an interval crossing zero."
+Then show the ship output for experiment #2 from the README ("Live evidence").
 
-## Scene 5 — AI agents and self-hosting (2:20–2:45)
+**Say:** "Verdict uses Flagsmith's own Bayesian results and thresholds. Our live experiment: not enough data, so don't
+call it. Ship refuses an inconclusive result. On our rehearsal, variant B won at 99.5% with an interval clear of zero.
+Ship rolled it out on the same flag, then checked what real users get. Twenty of twenty new users got the winner.
+And it found that unidentified requests still get the old value, which is easy to miss."
 
-**Show:** `python scripts/mcp_e2e.py` output (8 PASS), then `docker compose ps` in `selfhost/`.
+## 2:05–2:35 Track 2: an AI agent with a human in the loop
 
-**Say:** "The same tools are an MCP server, so Claude Code or Cursor can set up experiments, but every change is a
-plan you approve, bound to a fingerprint. And `preflight selfhost up` gives you a self-hosted Flagsmith with
-Experimentation in one command. It caught one more silent failure: on self-hosted Flagsmith, both SDKs still send
-events to Flagsmith Cloud unless you set the events URL. That's rule PF006. Preflight: so your experiments actually
-measure something."
+**Show:** `docs/agent-transcript.md`, then `python scripts/mcp_e2e.py` (12 PASS).
+
+**Say:** "Preflight is also an MCP server. Here Claude Code turned a one-line request into a plan, found all three
+blockers against live Flagsmith and my code, and changed nothing. Apply and ship are destructive tools: the client
+asks me first, plans are bound to a fingerprint, and an agent can never override the statistics."
+
+## 2:35–2:50 Track 3: self-hosted, reusable
+
+**Show:** `docker compose ps` in `selfhost/`, then the GitHub Action in the README.
+
+**Say:** "One command gives you open-source Flagsmith with Experimentation, bootstrapped through the API, and the same
+checks run in CI as a GitHub Action. Preflight: so your experiments actually measure something."
 
 ## After recording
 
-- Trim dead time; keep under 3:00.
-- Upload to YouTube as **Unlisted** (or as the hackathon requires); paste the link into the README and the submission.
+- Trim pauses; keep it under 3:00.
+- Upload as Unlisted on YouTube (unless the organisers require something else).
+- Paste the link into the README's top table and into the submission.

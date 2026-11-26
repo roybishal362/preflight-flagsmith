@@ -1,12 +1,17 @@
 [project]
 name = "preflight-flagsmith"
-version = "0.1.0"
+version = "0.2.0"
 description = "Catch the silent ways a Flagsmith experiment records nothing, before you launch it."
 requires-python = ">=3.10"
 dependencies = ["flagsmith>=6.3.0", "requests>=2.31"]
 
+[project.optional-dependencies]
+mcp = ["mcp>=2.3,<3"]
+dev = ["pytest>=8"]
+
 [project.scripts]
 preflight = "preflight.cli:main"
+preflight-mcp = "preflight.mcp_server:main"
 
 [build-system]
 requires = ["setuptools>=68"]

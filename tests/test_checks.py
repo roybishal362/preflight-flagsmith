@@ -67,3 +67,26 @@ def test_no_results_yet():
     from preflight.checks import normalise_flagsmith_results
     arms, meta = normalise_flagsmith_results({"results": None})
     assert arms == [] and "no results" in meta["state"]
+
+
+# Results with inference, captured from smoke experiment #697 (120 synthetic identities) on 2026-11-26.
+REAL_RESULTS_WITH_INFERENCE = {"results": {"as_of": "2026-11-26T17:00:57Z", "is_final": False, "payload": {
+    "metrics": [{"metric_id": 701,
+                 "variants": {"control": {"n": 63, "sum": 24.0, "sum_squares": 24.0},
+                              "variant_b": {"n": 57, "sum": 13.0, "sum_squares": 13.0}},
+                 "inference": {"variant_b": {"lift": -0.40131578947368424, "ci_low": -0.7467205102728565,
+                                             "ci_high": -0.055911068674511955,
+                                             "chance_to_win": 0.011386376744428273}}}],
+    "srm_p_value": None}}}
+
+
+def test_parse_real_inference_and_judge():
+    from preflight.checks import normalise_flagsmith_results
+    from preflight.gates import judge
+    arms, _ = normalise_flagsmith_results(REAL_RESULTS_WITH_INFERENCE, {"control": 50, "variant_b": 50}, 701)
+    b = next(a for a in arms if a.name == "variant_b")
+    assert b.identities == 57 and b.conversions == 13
+    assert abs(b.win_probability - 0.0114) < 1e-3
+    assert abs(b.ci_low + 0.7467) < 1e-3 and abs(b.ci_high + 0.0559) < 1e-3
+    v = judge(arms)
+    assert v.status == "loser" and v.ship == "control"

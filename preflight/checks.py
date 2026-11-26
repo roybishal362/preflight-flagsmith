@@ -125,20 +125,24 @@ def normalise_flagsmith_results(raw: Any, allocations: dict[str, float] | None =
     arms = []
     for name, stats in (m.get("variants") or {}).items():
         inf = _inference_for(m.get("inference"), name)
-        ci = _first(inf, "credible_interval", "lift_credible_interval", "ci", "lift_ci", default=None)
-        lo = hi = None
-        if isinstance(ci, (list, tuple)) and len(ci) == 2:
-            lo, hi = _ratio(ci[0]), _ratio(ci[1])
-        elif isinstance(ci, dict):
-            lo, hi = _ratio(_first(ci, "lower", "low")), _ratio(_first(ci, "upper", "high"))
+        # Verified shape (2026-11-26, experiment #697): inference.<variant> = {lift, ci_low, ci_high, chance_to_win}
+        # Lift values are relative fractions (-0.40 = -40%), so they are used as-is, not rescaled.
+        lo, hi = inf.get("ci_low"), inf.get("ci_high")
+        if lo is None:
+            ci = _first(inf, "credible_interval", "lift_credible_interval", "ci", "lift_ci", default=None)
+            if isinstance(ci, (list, tuple)) and len(ci) == 2:
+                lo, hi = ci
+            elif isinstance(ci, dict):
+                lo, hi = _first(ci, "lower", "low"), _first(ci, "upper", "high")
         arms.append(Arm(
             name=name,
             identities=int(stats.get("n") or 0),
             conversions=int(round(stats.get("sum") or 0)),  # occurrence metric: identities that converted
             expected_share=_ratio(allocations.get(name)),
-            win_probability=_ratio(_first(inf, "chance_to_beat_control", "probability_to_beat_control",
-                                          "win_probability", "prob_beat_control")),
-            ci_low=lo, ci_high=hi, is_control=(name == "control"),
+            win_probability=_ratio(_first(inf, "chance_to_win", "chance_to_beat_control",
+                                          "probability_to_beat_control", "win_probability")),
+            ci_low=float(lo) if lo is not None else None, ci_high=float(hi) if hi is not None else None,
+            is_control=(name == "control"),
         ))
     # make sure every allocated arm appears, even with zero data
     for name, share in allocations.items():

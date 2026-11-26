@@ -141,7 +141,7 @@ def cmd_smoke(a) -> int:
 
 def cmd_verdict(a) -> int:
     from .api import FlagsmithAdmin
-    from .checks import normalise_results
+    from .checks import allocations_of, normalise_flagsmith_results
 
     env_key = a.environment or os.environ.get("FLAGSMITH_ENVIRONMENT_KEY")
     api = FlagsmithAdmin()
@@ -154,14 +154,27 @@ def cmd_verdict(a) -> int:
     raw = api.results(env_key, a.experiment_id)
     if a.raw:
         print(json.dumps(raw, indent=2)); return 0
-    arms = normalise_results(raw)
+    exp = api.experiment(env_key, a.experiment_id)
+    primary = next((m.get("metric") for m in exp.get("metrics") or []), None)
+    arms, meta = normalise_flagsmith_results(raw, allocations_of(exp), primary)
     v = judge(arms)
+    fs_srm = meta.get("flagsmith_srm_p_value")
+    if fs_srm is not None and fs_srm < 0.001 and v.status != "srm":
+        v.status, v.headline = "srm", "Flagsmith reports a sample-ratio mismatch. Do not trust these results."
     if a.json:
-        print(json.dumps({"verdict": v.as_dict(), "arms": [x.__dict__ for x in arms]}, indent=2)); return 0
+        print(json.dumps({"experiment": exp.get("name"), "meta": meta, "verdict": v.as_dict(),
+                          "arms": [x.__dict__ for x in arms]}, indent=2)); return 0
+    print(c(f"Experiment #{exp.get('id')} '{exp.get('name')}'", "1"), f"({exp.get('status')}, results as of {meta.get('as_of')})")
+    if exp.get("hypothesis"):
+        print(c(f"Hypothesis: {exp['hypothesis']}", "2"))
+    for arm in arms:
+        rate = f"{arm.conversions / arm.identities:.1%}" if arm.identities else "n/a"
+        print(f"  {arm.name:<12} identities={arm.identities:<5} converted={arm.conversions or 0:<5} rate={rate}")
     colour = {"winner": "32;1", "loser": "33;1", "srm": "31;1"}.get(v.status, "36;1")
     print(c(v.headline, colour))
     for r in v.reasons:
         print("  -", r)
+    audit("verdict", experiment=a.experiment_id, status=v.status)
     return 0
 
 

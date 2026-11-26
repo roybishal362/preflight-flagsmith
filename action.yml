@@ -1,0 +1,29 @@
+name: "Preflight for Flagsmith Experimentation"
+description: "Fail the build when code would make a Flagsmith experiment silently record nothing."
+branding:
+  icon: "flag"
+  color: "purple"
+inputs:
+  path:
+    description: "Path to the app code to scan"
+    default: "."
+  events:
+    description: "Comma-separated metric event names (case-sensitive)"
+    default: ""
+runs:
+  using: "composite"
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+    - shell: bash
+      run: pip install --quiet "${{ github.action_path }}"
+    - shell: bash
+      env:
+        PF_PATH: ${{ inputs.path }}
+        PF_EVENTS: ${{ inputs.events }}
+      run: |
+        args=()
+        IFS=',' read -ra evs <<< "$PF_EVENTS"
+        for e in "${evs[@]}"; do [ -n "$e" ] && args+=(--event "$(echo "$e" | xargs)"); done
+        preflight lint "$PF_PATH" "${args[@]}"

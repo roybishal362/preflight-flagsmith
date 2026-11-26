@@ -139,8 +139,14 @@ def test_event_names_in_constants_are_resolved(tmp_path):
 def test_pf006_self_hosted_events_go_to_cloud(tmp_path):
     write(tmp_path, "src/App.tsx", GOOD_JS.replace("enableEvents: true", "enableEvents: true, api: 'http://localhost:8000/api/v1/'"))
     assert ("PF006", "error") in rules(lint(tmp_path, {"demo_button_clicked"}))
+    # A top-level eventsApiUrl is ignored by the JS SDK (found by a live browser test), so it is still PF006.
     write(tmp_path, "src/App.tsx", GOOD_JS.replace(
         "enableEvents: true", "enableEvents: true, api: 'http://localhost:8000/api/v1/', eventsApiUrl: 'http://localhost:8000/api/'"))
+    found = [f for f in lint(tmp_path, {"demo_button_clicked"}) if f.rule == "PF006"]
+    assert found and "top level" in found[0].message
+    write(tmp_path, "src/App.tsx", GOOD_JS.replace(
+        "enableEvents: true",
+        "enableEvents: true, api: 'http://localhost:8000/api/v1/', eventProcessorConfig: { eventsApiUrl: 'http://localhost:8000/api/' }"))
     assert lint(tmp_path, {"demo_button_clicked"}) == []
 
 

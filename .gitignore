@@ -9,3 +9,4 @@ __pycache__/
 selfhost/.env
 selfhost/.env.local
 demo_broken/
+web/.env.selfhost

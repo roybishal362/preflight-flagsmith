@@ -8,6 +8,12 @@ const CONVERSION_EVENT = 'demo_button_clicked' // metric event name, case-sensit
 const REPO_URL = 'https://github.com/roybishal362/preflight-flagsmith'
 
 const ENV_KEY = import.meta.env.VITE_FLAGSMITH_ENV_KEY as string
+// Self-hosted Flagsmith: set BOTH, or events silently go to Flagsmith Cloud (Preflight rule PF006).
+const API_URL = (import.meta.env.VITE_FLAGSMITH_API_URL as string | undefined) || undefined
+// If only the API URL is given, derive the events URL from it (…/api/v1/ -> …/api/) rather than fall back to Cloud.
+const EVENTS_URL =
+  (import.meta.env.VITE_FLAGSMITH_EVENTS_URL as string | undefined) ||
+  (API_URL ? API_URL.replace(/v1\/?$/, '') : undefined)
 
 const LABELS: Record<string, string> = {
   control: 'Get the demo',
@@ -40,7 +46,14 @@ export default function App() {
   useEffect(() => {
     let cancelled = false
     ;(async () => {
-      await flagsmith.init({ environmentID: ENV_KEY, enableEvents: true, defaultFlags: {} })
+      await flagsmith.init({
+        environmentID: ENV_KEY,
+        enableEvents: true,
+        defaultFlags: {},
+        // The JS SDK reads the events URL ONLY from eventProcessorConfig (verified in 12.6 source);
+        // a top-level `eventsApiUrl` is silently ignored and events go to Flagsmith Cloud.
+        ...(API_URL ? { api: API_URL, eventProcessorConfig: { eventsApiUrl: EVENTS_URL } } : {}),
+      })
       await flagsmith.identify(visitorId())
       const flag = flagsmith.getExperimentFlag(EXPERIMENT_FLAG)
       if (!cancelled) {

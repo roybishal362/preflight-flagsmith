@@ -90,6 +90,9 @@ PY_SCRIPT = re.compile(r"if\s+__name__\s*==\s*['\"]__main__['\"]")
 # flagsmith 6.7 `EventProcessorConfig(events_api_url=...)`).
 JS_CUSTOM_API = re.compile(r"\bapi\s*:\s*(?!['\"`]?https://(?:edge\.)?api\.flagsmith\.com)[^,}\s][^,}\n]*")
 JS_EVENTS_URL = re.compile(r"\beventsApiUrl\s*:")
+# The JS SDK honours eventsApiUrl ONLY inside eventProcessorConfig (12.6 src/flagsmith-core.ts builds the
+# EventProcessor from eventProcessorConfig); a top-level eventsApiUrl is ignored. Found by a live browser test.
+JS_EVENTS_URL_NESTED = re.compile(r"\beventProcessorConfig\s*:\s*\{[^}]*\beventsApiUrl\s*:", re.S)
 PY_CUSTOM_API = re.compile(r"\bapi_url\s*=\s*(?!['\"]https://(edge\.)?api\.flagsmith\.com)[^,)\n]+")
 PY_EVENTS_URL = re.compile(r"\bevents_api_url\s*=")
 
@@ -242,12 +245,15 @@ def lint(root: Path, metric_events: set[str] | None = None) -> list[Finding]:
                                         "Exposures are only recorded for identified users.",
                                         "Call `await flagsmith.identify(<stable user or visitor id>)` before reading the flag."))
         custom = _search(JS_CUSTOM_API, f)
-        if custom and _search(JS_EVENTS_ON, f) and not _search(JS_EVENTS_URL, f):
-            findings.append(Finding("PF006", "error", str(f.path), f.line_of(custom.start()),
-                                    "Flags come from a custom/self-hosted API, but events still go to Flagsmith Cloud "
-                                    "(the SDK's events URL defaults to https://events.api.flagsmith.com/). "
-                                    "Your instance will record no exposures or conversions.",
-                                    "Also pass `eventsApiUrl: '<your host>/api/'` to init()."))
+        if custom and _search(JS_EVENTS_ON, f) and not _search(JS_EVENTS_URL_NESTED, f):
+            top = _search(JS_EVENTS_URL, f)
+            msg = ("`eventsApiUrl` is set at the top level of init(), where the JS SDK ignores it, so events still go "
+                   "to Flagsmith Cloud. " if top else
+                   "Flags come from a custom/self-hosted API, but events still go to Flagsmith Cloud "
+                   "(the SDK's events URL defaults to https://events.api.flagsmith.com/). ")
+            findings.append(Finding("PF006", "error", str(f.path), f.line_of((top or custom).start()),
+                                    msg + "Your instance will record no exposures or conversions.",
+                                    "Pass `eventProcessorConfig: { eventsApiUrl: '<your host>/api/' }` to init()."))
         if _search(JS_NODE_CLIENT, f) and _search(JS_EVENTS_ON, f) and not _search(JS_FLUSH, f):
             m = _search(JS_NODE_CLIENT, f)
             findings.append(Finding("PF004", "warning", str(f.path), f.line_of(m.start()),

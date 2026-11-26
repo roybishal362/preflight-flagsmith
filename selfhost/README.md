@@ -36,7 +36,8 @@ both URLs, or your self-hosted experiment records nothing. Preflight flags this 
 await flagsmith.init({
   environmentID: '<client-side key>',
   api: 'http://localhost:8000/api/v1/',
-  eventsApiUrl: 'http://localhost:8000/api/',   // without this, events go to events.api.flagsmith.com
+  // Must be nested: @flagsmith/flagsmith 12.6 ignores a top-level `eventsApiUrl`.
+  eventProcessorConfig: { eventsApiUrl: 'http://localhost:8000/api/' },
   enableEvents: true,
 })
 ```

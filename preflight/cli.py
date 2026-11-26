@@ -425,7 +425,54 @@ def cmd_selfhost(a) -> int:
         return 0
     if a.action == "down":
         return subprocess.run(["docker", "compose", "down"] + (["-v"] if a.wipe else []), cwd=folder).returncode
+    if a.action == "demo":
+        return _selfhost_demo(folder, a.yes)
     return 2
+
+
+def _selfhost_demo(folder: Path, assume_yes: bool) -> int:
+    """Create the demo page's experiment on the self-hosted instance and point the page at it."""
+    from .api import FlagsmithAdmin
+    from .planner import ApplyError, Spec, Variant, apply_plan, build_plan
+
+    local = folder / ".env.local"
+    if not local.exists():
+        print("Run `preflight selfhost up` first."); return 2
+    vals = dict(line.split("=", 1) for line in local.read_text(encoding="utf-8").splitlines()
+                if "=" in line and not line.startswith("#"))
+    api = FlagsmithAdmin(vals["FLAGSMITH_API_KEY"], vals["FLAGSMITH_API_URL"])
+    env = vals["FLAGSMITH_ENVIRONMENT_KEY"]
+    spec = Spec(environment=env, name="Demo button text test", flag="show_demo_button",
+                hypothesis='A clearer CTA label ("Try the live demo now") increases demo button clicks compared with "Get the demo".',
+                variants=[Variant("variant_b", "variant_b")], event="demo_button_clicked",
+                metric_name="Demo button click", code_path="web")
+    plan = build_plan(api, spec)
+    already = any(p.startswith("Flag 'show_demo_button' already has experiment") for p in plan.problems)
+    if already:
+        print("• The demo experiment already exists on this instance.")
+    else:
+        _print_plan(plan)
+        if not plan.ok:
+            return 1
+        if not confirm("Create and start the demo experiment on your self-hosted Flagsmith?", assume_yes):
+            return 1
+        try:
+            res = apply_plan(api, plan, start=True)
+        except ApplyError as e:
+            print(c(f"✗ {e}", "31;1")); return 1
+        audit("selfhost.demo", **res)
+        print(c(f"✓ Demo experiment #{res['experiment_id']} is {res['status']}.", "32;1"))
+    base = vals["FLAGSMITH_API_URL"].removesuffix("/").removesuffix("/v1").removesuffix("/api")
+    web_env = Path("web") / ".env.selfhost"
+    web_env.write_text("# Written by `preflight selfhost demo`. Points the demo page at your self-hosted Flagsmith.\n"
+                       f"VITE_FLAGSMITH_ENV_KEY={env}\n"
+                       f"VITE_FLAGSMITH_API_URL={base}/api/v1/\n"
+                       f"VITE_FLAGSMITH_EVENTS_URL={base}/api/\n", encoding="utf-8")
+    print(f"✓ Wrote {web_env}\n\nRun the page against your own Flagsmith:\n"
+          "  cd web && npm install && npm run dev -- --mode selfhost --port 5174\n"
+          "  open http://localhost:5174 , click the button, then:\n"
+          f"  preflight --env-file {local} check web")
+    return 0
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -488,7 +535,8 @@ def main(argv: list[str] | None = None) -> int:
     s.set_defaults(fn=cmd_ship)
 
     s = sub.add_parser("selfhost", help="run and bootstrap a self-hosted Flagsmith with Experimentation")
-    s.add_argument("action", choices=["up", "bootstrap", "down"])
+    s.add_argument("action", choices=["up", "bootstrap", "down", "demo"])
+    s.add_argument("--yes", action="store_true")
     s.add_argument("--folder", default="selfhost")
     s.add_argument("--wipe", action="store_true", help="with down: also delete the database volume")
     s.set_defaults(fn=cmd_selfhost)

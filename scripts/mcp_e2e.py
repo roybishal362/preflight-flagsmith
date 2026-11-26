@@ -36,8 +36,10 @@ async def main() -> int:
         async with ClientSession(read, write) as s:
             await s.initialize()
             tools = {t.name: t for t in (await s.list_tools()).tools}
-            check("lists 5 tools", set(tools) == {"preflight_lint", "preflight_check", "preflight_plan",
-                                                   "preflight_apply", "preflight_verdict"}, ", ".join(sorted(tools)))
+            check("lists 7 tools", set(tools) == {"preflight_lint", "preflight_check", "preflight_plan", "preflight_apply",
+                                                   "preflight_verdict", "preflight_ship_preview", "preflight_ship"},
+                  ", ".join(sorted(tools)))
+            check("ship is marked destructive", bool(tools["preflight_ship"].annotations.destructive_hint))
             ann = tools["preflight_apply"].annotations
             check("apply is marked destructive", bool(ann and ann.destructive_hint))
             check("plan is marked read-only", bool(tools["preflight_plan"].annotations.read_only_hint))
@@ -61,6 +63,12 @@ async def main() -> int:
             r = payload(await s.call_tool("preflight_verdict", {"experiment_id": 692}))
             check("verdict: reads live experiment #692", r["experiment"]["id"] == 692,
                   f"{r['verdict']['status']}: {r['verdict']['headline']}")
+
+            r = payload(await s.call_tool("preflight_ship_preview", {"experiment_id": 692}))
+            check("ship_preview: nothing to ship yet on #692", r["allowed"] is False, r["reason"][:60])
+
+            r = payload(await s.call_tool("preflight_ship", {"experiment_id": 692}))
+            check("ship: refuses while the evidence is insufficient", r["shipped"] is False, r["reason"][:60])
     print(f"\n{'ALL PASSED' if not failures else f'{failures} FAILED'}")
     return 1 if failures else 0
 

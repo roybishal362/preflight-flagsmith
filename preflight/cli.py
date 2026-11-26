@@ -109,6 +109,10 @@ def cmd_smoke(a) -> int:
     if live and env_key == live and not a.allow_live:
         print("That is your live experiment's environment. Synthetic users would pollute real results.\n"
               "Use a separate environment, or pass --allow-live if you really mean it."); return 2
+    effects = {}
+    for raw in a.effect or []:
+        k, _, r = raw.partition("=")
+        effects[k.strip()] = float(r)
     run = uuid.uuid4().hex[:6]
     plan = (f"Smoke test: {a.n} synthetic identities 'preflight_smoke_{run}_<i>' will read '{a.flag}' "
             f"and {a.rate:.0%} of them will send '{a.event}' to environment {env_key[:6]}….")
@@ -139,7 +143,8 @@ def cmd_smoke(a) -> int:
         flag = fs.get_experiment_flag(a.flag, identifier=ident)
         value = str(flag.value) if getattr(flag, "enabled", False) else "(disabled)"
         seen[value] = seen.get(value, 0) + 1
-        if (i * 7919) % 100 < a.rate * 100:  # deterministic spread, no randomness in tests
+        rate = effects.get(value, a.rate)  # --effect lets a test environment simulate a real difference
+        if (i * 7919) % 100 < rate * 100:  # deterministic spread, no randomness in tests
             fs.track_event(a.event, identifier=ident)
             converted += 1
     fs.track_event(probe, identifier=f"preflight_smoke_{run}_0")
@@ -353,6 +358,37 @@ def cmd_apply(a) -> int:
     return 0
 
 
+def cmd_ship(a) -> int:
+    from .api import FlagsmithAdmin
+    from .ship import plan_ship, ship
+
+    env_key = a.environment or os.environ.get("FLAGSMITH_ENVIRONMENT_KEY")
+    api = FlagsmithAdmin()
+    sp = plan_ship(api, env_key, a.experiment_id, a.decision, a.reason)
+    exp = sp.experiment
+    print(c(f"Experiment #{exp.get('id')} '{exp.get('name')}' ({exp.get('status')})", "1"))
+    print(f"  Verdict : {sp.verdict.headline}")
+    for r in sp.verdict.reasons:
+        print(f"            - {r}")
+    if not sp.allowed:
+        print(c(f"✗ Not shipping. {sp.reason}", "31;1"))
+        audit("ship.refused", experiment=a.experiment_id, reason=sp.reason)
+        return 1
+    what = {"control": "keep CONTROL", "disable": "DISABLE the flag",
+            "variant": f"roll out variant '{sp.variant_key}' to everyone"}[sp.decision]
+    print(c(f"  Decision: {what}" + ("  [GATES OVERRIDDEN]" if sp.overridden else ""), "33;1" if sp.overridden else "32;1"))
+    print(f"  Call    : POST environments/{env_key[:6]}…/experiments/{exp['id']}/complete/ {json.dumps(sp.body())}")
+    if not confirm("Complete the experiment and ship this decision?", a.yes):
+        audit("ship.declined", experiment=a.experiment_id); return 1
+    res = ship(api, env_key, sp)
+    audit("ship.done", experiment=a.experiment_id, decision=sp.decision, variant=sp.variant_key,
+          overridden=sp.overridden, reason=sp.reason, result=res)
+    print(c(f"✓ Shipped. Flagsmith now reports status={res['status']}, decision={res['rollout_decision']}"
+            + (f", variant id {res['rollout_variant']}" if res.get("rollout_variant") else "")
+            + f", ended {res['ended_at']}.", "32;1"))
+    return 0
+
+
 def cmd_selfhost(a) -> int:
     import subprocess
 
@@ -429,6 +465,14 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--yes", action="store_true")
     s.set_defaults(fn=cmd_apply)
 
+    s = sub.add_parser("ship", help="complete an experiment and roll out the winner, if the evidence supports it")
+    s.add_argument("experiment_id", type=int)
+    s.add_argument("--environment")
+    s.add_argument("--decision", help="control | disable | <variant key>; only used when the evidence doesn't decide")
+    s.add_argument("--reason", help="required with --decision when overriding the gates")
+    s.add_argument("--yes", action="store_true")
+    s.set_defaults(fn=cmd_ship)
+
     s = sub.add_parser("selfhost", help="run and bootstrap a self-hosted Flagsmith with Experimentation")
     s.add_argument("action", choices=["up", "bootstrap", "down"])
     s.add_argument("--folder", default="selfhost")
@@ -443,6 +487,8 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--rate", type=float, default=0.3)
     s.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     s.add_argument("--allow-live", action="store_true")
+    s.add_argument("--effect", action="append", help="VALUE=RATE: conversion rate for one variant value "
+                   "(test environments only, to rehearse shipping a winner)")
     s.add_argument("--verify-timeout", type=int, default=120, help="seconds to wait for Flagsmith to ingest events")
     s.set_defaults(fn=cmd_smoke)
 

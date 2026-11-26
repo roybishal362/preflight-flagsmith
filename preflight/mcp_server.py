@@ -13,6 +13,7 @@ Safety model:
   - smoke (writes synthetic traffic) is deliberately NOT exposed to agents.
   - every call is appended to .preflight/audit.jsonl.
 
+Tools: lint, check, plan, apply, verdict, ship_preview, ship.
 Run:  python -m preflight.mcp_server        (stdio)
 Add to Claude Code:  claude mcp add preflight -- python -m preflight.mcp_server
 """
@@ -169,6 +170,39 @@ def preflight_verdict(experiment_id: int, environment: str | None = None, refres
     return {"experiment": {"id": exp.get("id"), "name": exp.get("name"), "status": exp.get("status"),
                            "hypothesis": exp.get("hypothesis")},
             "verdict": v.as_dict(), "arms": [a.__dict__ for a in arms], "meta": meta, "note": note}
+
+
+@server.tool(annotations=READ_ONLY)
+def preflight_ship_preview(experiment_id: int, environment: str | None = None) -> dict[str, Any]:
+    """Preview round 4 (ship the winner) without changing anything: what the evidence supports shipping
+    (a winning variant, or control), or why nothing should be shipped yet."""
+    from .api import FlagsmithAdmin
+    from .ship import plan_ship
+
+    sp = plan_ship(FlagsmithAdmin(), _env(environment), experiment_id)
+    audit("mcp.ship_preview", experiment=experiment_id, allowed=sp.allowed)
+    out = sp.as_dict()
+    out["next"] = ("Show this to the user. If they approve, call preflight_ship with the same experiment_id."
+                   if sp.allowed else "Do not ship. Explain the reason to the user.")
+    return out
+
+
+@server.tool(annotations=WRITES)
+def preflight_ship(experiment_id: int, environment: str | None = None) -> dict[str, Any]:
+    """Complete the experiment and roll out what the evidence supports: the winning variant, or control.
+    Agents cannot override the statistical gates: if the evidence doesn't decide, this refuses. (A human can
+    still override from the CLI with a written reason, which is audited.)"""
+    from .api import FlagsmithAdmin
+    from .ship import plan_ship, ship
+
+    api, env = FlagsmithAdmin(), _env(environment)
+    sp = plan_ship(api, env, experiment_id)
+    if not sp.allowed:
+        audit("mcp.ship.refused", experiment=experiment_id, reason=sp.reason)
+        return {"shipped": False, "reason": sp.reason, "verdict": sp.verdict.as_dict()}
+    res = ship(api, env, sp)
+    audit("mcp.ship.done", experiment=experiment_id, decision=sp.decision, variant=sp.variant_key, result=res)
+    return {"shipped": True, "decision": sp.decision, "variant": sp.variant_key, "flagsmith": res}
 
 
 def main() -> None:

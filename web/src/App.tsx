@@ -2,11 +2,17 @@ import { useEffect, useState } from 'react'
 import flagsmith from '@flagsmith/flagsmith'
 import './App.css'
 
-// Experiment wiring. These names must match what you create in the Flagsmith dashboard.
-const EXPERIMENT_FLAG = 'show_demo_button'   // multivariate flag, variants must have keys
+// Experiment wiring. These names must match the Flagsmith dashboard (checked by `preflight check`).
+const EXPERIMENT_FLAG = 'show_demo_button'   // multivariate flag: control | variant_b
 const CONVERSION_EVENT = 'demo_button_clicked' // metric event name, case-sensitive
+const REPO_URL = 'https://github.com/roybishal362/preflight-flagsmith'
 
 const ENV_KEY = import.meta.env.VITE_FLAGSMITH_ENV_KEY as string
+
+const LABELS: Record<string, string> = {
+  control: 'Get the demo',
+  variant_b: 'Try the live demo now',
+}
 
 function visitorId(): string {
   const k = 'preflight_visitor_id'
@@ -18,27 +24,32 @@ function visitorId(): string {
   return id
 }
 
+const FAILURES = [
+  ['Events never enabled', 'No exposures, no conversions.'],
+  ['Flag read before identify()', 'No exposures recorded.'],
+  ['Event name case mismatch', 'Conversions silently ignored.'],
+  ['Events never flushed', 'Data lost when the process exits.'],
+  ['Variant without a key', 'Half your traffic records nothing.'],
+]
+
 export default function App() {
   const [variant, setVariant] = useState<string>('control')
   const [ready, setReady] = useState(false)
-  const [clicked, setClicked] = useState(false)
+  const [busy, setBusy] = useState(false)
 
   useEffect(() => {
     let cancelled = false
     ;(async () => {
-      await flagsmith.init({
-        environmentID: ENV_KEY,
-        enableEvents: true,
-        defaultFlags: {},
-      })
+      await flagsmith.init({ environmentID: ENV_KEY, enableEvents: true, defaultFlags: {} })
       await flagsmith.identify(visitorId())
       const flag = flagsmith.getExperimentFlag(EXPERIMENT_FLAG)
       if (!cancelled) {
-        setVariant(flag?.enabled && flag?.value ? String(flag.value) : 'control')
+        const value = flag?.enabled && flag?.value ? String(flag.value) : 'control'
+        setVariant(value in LABELS ? value : 'control')
         setReady(true)
       }
     })().catch(() => {
-      if (!cancelled) setReady(true) // fall back to control if Flagsmith is unreachable
+      if (!cancelled) setReady(true) // Flagsmith unreachable: show control
     })
     return () => {
       cancelled = true
@@ -46,21 +57,53 @@ export default function App() {
   }, [])
 
   const onClick = async () => {
-    setClicked(true)
-    flagsmith.trackEvent(CONVERSION_EVENT)
-    await flagsmith.flushEvents()
+    setBusy(true)
+    try {
+      flagsmith.trackEvent(CONVERSION_EVENT)
+      await flagsmith.flushEvents() // send before we navigate away
+    } finally {
+      window.location.href = REPO_URL
+    }
   }
 
-  if (!ready) return <main><p>Loading…</p></main>
-
   return (
-    <main>
+    <main className="page">
+      <p className="eyebrow">Toggle Wars · Flagsmith Experimentation Hackathon</p>
       <h1>Preflight</h1>
-      <p>Checks your Flagsmith A/B test before launch, so it never silently records nothing.</p>
-      <button onClick={onClick} disabled={clicked}>
-        {variant === 'control' ? 'Get the demo' : variant === 'variant_b' ? 'Try the live demo now' : 'Get the demo'}
+      <p className="lead">
+        Your Flagsmith A/B test can look perfect in the dashboard and still record <strong>nothing</strong>.
+        Preflight checks your code and your Flagsmith setup before launch, then refuses to call a winner too early.
+      </p>
+
+      <button className="cta" onClick={onClick} disabled={!ready || busy}>
+        {ready ? LABELS[variant] : 'Loading…'}
       </button>
-      {clicked && <p>Thanks. Your click was recorded.</p>}
+      <p className="note">Opens the open-source repo on GitHub.</p>
+
+      <section>
+        <h2>The silent failures it catches</h2>
+        <ul className="failures">
+          {FAILURES.map(([what, effect]) => (
+            <li key={what}>
+              <span>{what}</span>
+              <em>{effect}</em>
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <section>
+        <h2>You are in an experiment right now</h2>
+        <p>
+          This page runs a real Flagsmith experiment on the button above. Visitors are split 50/50 between two labels,
+          and a click counts as a conversion. No personal data is collected: only a random ID stored in your browser.
+        </p>
+        <pre className="cli">{`$ preflight lint ./web --event demo_button_clicked
+✓ No problems found. This experiment can record data.
+
+$ preflight verdict 692
+Not enough data yet. Do not call a winner.`}</pre>
+      </section>
     </main>
   )
 }

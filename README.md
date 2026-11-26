@@ -85,6 +85,8 @@ the Organisation API key is read from a git-ignored `.env`, never from the comma
 - **Flag:** `show_demo_button`. Control `control` ("Get the demo"), variation `variant_b` ("Try the live demo now").
 - **Metric:** `Demo button click`, event `demo_button_clicked`, occurrence, higher is better.
 - **Split:** 100% of visitors enter, 50/50. Visitors are identified by a random ID kept in `localStorage`.
+- **Data hygiene:** two identities in the data are the builder's own test clicks (one local, one on the live page,
+  both 2026-11-26, both landed in control). They are disclosed here and are far below the 50-per-arm gate.
 - **Result:** run `preflight verdict 692`. It is reported here only once the gates are met. *(Pending, see Status.)*
 
 ## Quick start

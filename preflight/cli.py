@@ -178,6 +178,110 @@ def cmd_verdict(a) -> int:
     return 0
 
 
+def _spec_from_args(a):
+    from .planner import Spec, Variant
+
+    if a.spec:
+        return Spec.from_dict(json.loads(Path(a.spec).read_text(encoding="utf-8")))
+    env_key = a.environment or os.environ.get("FLAGSMITH_ENVIRONMENT_KEY")
+    missing = [n for n, v in (("--name", a.name), ("--flag", a.flag), ("--event", a.event),
+                              ("--hypothesis", a.hypothesis), ("--variant", a.variant), ("environment", env_key)) if not v]
+    if missing:
+        raise SystemExit(f"Missing: {', '.join(missing)} (or pass --spec file.json)")
+    variants = []
+    for raw in a.variant:
+        key, _, value = raw.partition("=")
+        variants.append(Variant(key.strip(), (value or key).strip()))
+    split = {}
+    for raw in a.split or []:
+        k, _, pct = raw.partition("=")
+        split[k.strip()] = float(pct)
+    return Spec(environment=env_key, name=a.name, hypothesis=a.hypothesis, flag=a.flag, variants=variants,
+                event=a.event, metric_name=a.metric_name, control_value=a.control_value, traffic=a.traffic,
+                split=split, code_path=a.code)
+
+
+def _print_plan(plan) -> None:
+    print(c(f"Plan {plan.fingerprint()}  ·  environment '{plan.existing.get('environment')}'", "1"))
+    print(f"  Experiment : {plan.spec.name}\n  Hypothesis : {plan.spec.hypothesis}")
+    print(f"  Flag       : {plan.spec.flag} (control='{plan.spec.control_value}', variations: "
+          + ", ".join(f"{v.key}='{v.value}'" for v in plan.spec.variants) + ")")
+    print(f"  Metric     : event '{plan.spec.event}' ({plan.spec.aggregation}, {plan.spec.direction})")
+    if plan.existing:
+        print(c(f"  Already in Flagsmith: {json.dumps({k: v for k, v in plan.existing.items() if k != 'environment'})}", "2"))
+    print(c("\nChanges (nothing has been sent yet):", "1"))
+    for i, s in enumerate(plan.steps, 1):
+        print(f"  {i}. {s.summary}\n     {s.method} {s.path}")
+    for w in plan.warnings:
+        print(c("  WARN  ", "33;1") + w)
+    for p in plan.problems:
+        print(c("  BLOCK ", "31;1") + p)
+    print(c("\n✓ Plan is safe to apply." if plan.ok else "\n✗ Fix the BLOCK items before applying.",
+            "32;1" if plan.ok else "31;1"))
+
+
+def cmd_plan(a) -> int:
+    from .api import FlagsmithAdmin
+    from .planner import build_plan
+
+    spec = _spec_from_args(a)
+    plan = build_plan(FlagsmithAdmin(), spec)
+    out = Path(".preflight") / "plans" / f"{plan.fingerprint()}.json"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(plan.to_dict(), indent=2), encoding="utf-8")
+    audit("plan", fingerprint=plan.fingerprint(), ok=plan.ok, steps=len(plan.steps), problems=len(plan.problems))
+    if a.json:
+        print(json.dumps(plan.to_dict(), indent=2))
+    else:
+        _print_plan(plan)
+        if plan.ok:
+            print(f"\nReview it, then: preflight apply {out}" + (" --start" if not a.json else ""))
+    return 0 if plan.ok else 1
+
+
+def cmd_apply(a) -> int:
+    from .api import FlagsmithAdmin
+    from .planner import Spec, apply_plan, build_plan
+
+    saved = json.loads(Path(a.plan_file).read_text(encoding="utf-8"))
+    api = FlagsmithAdmin()
+    plan = build_plan(api, Spec.from_dict(saved["spec"]))  # re-read live state; never trust a stale plan
+    if plan.fingerprint() != saved["fingerprint"]:
+        print(c("Flagsmith changed since this plan was made. Here is the current plan:", "33;1"))
+    _print_plan(plan)
+    if not plan.ok:
+        audit("apply.blocked", fingerprint=plan.fingerprint(), problems=plan.problems)
+        return 1
+    if not plan.steps:
+        print("Nothing to do."); return 0
+    if plan.fingerprint() != saved["fingerprint"] and not a.yes:
+        print("Re-run `preflight plan` and review the new plan before applying."); return 1
+    what = "apply these changes" + (" and START the experiment (this locks the flag)" if a.start else "")
+    if not confirm(f"\n{what[0].upper() + what[1:]}?", a.yes):
+        audit("apply.declined", fingerprint=plan.fingerprint()); return 1
+
+    def log(step, res):
+        rid = res.get("id") if isinstance(res, dict) else None
+        print(c("  ✓ ", "32") + step.summary + (f"  (id {rid})" if rid else ""))
+        audit("apply.step", fingerprint=plan.fingerprint(), call=f"{step.method} {step.path}", id=rid)
+
+    from .planner import ApplyError
+    try:
+        result = apply_plan(api, plan, start=a.start, on_step=log)
+    except ApplyError as e:
+        audit("apply.failed", fingerprint=plan.fingerprint(), step=e.step_no, call=f"{e.step.method} {e.step.path}",
+              error=str(e.cause)[:300], done=e.done)
+        print(c(f"\n✗ Step {e.step_no} failed: {e.step.summary}\n  {e.cause}", "31;1"))
+        print(f"  Already applied: {e.done or 'nothing'}.\n  Nothing after step {e.step_no} was sent. "
+              "Fix the cause, then run `preflight plan` again: it skips what already exists and resumes.")
+        return 1
+    audit("apply.done", fingerprint=plan.fingerprint(), **result)
+    print(c(f"\nDone: experiment #{result['experiment_id']} status={result['status']}", "32;1"))
+    if not a.start:
+        print("Not started. Run your smoke test, then start it in the dashboard or with --start.")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):  # Windows consoles default to cp1252
         try:
@@ -200,6 +304,28 @@ def main(argv: list[str] | None = None) -> int:
     s.add_argument("--environment")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_check)
+
+    s = sub.add_parser("plan", help="validate and preview an experiment (read-only)")
+    s.add_argument("--spec", help="JSON spec file (instead of the flags below)")
+    s.add_argument("--environment")
+    s.add_argument("--name")
+    s.add_argument("--hypothesis")
+    s.add_argument("--flag")
+    s.add_argument("--control-value", default="control")
+    s.add_argument("--variant", action="append", help="KEY or KEY=VALUE (repeatable)")
+    s.add_argument("--split", action="append", help="KEY=PERCENT of experiment traffic (default: even)")
+    s.add_argument("--traffic", type=float, default=100.0, help="%% of users who enter the experiment")
+    s.add_argument("--event", help="conversion event name (case-sensitive)")
+    s.add_argument("--metric-name")
+    s.add_argument("--code", help="path to your app: confirm it really sends the event")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_plan)
+
+    s = sub.add_parser("apply", help="apply a reviewed plan (asks a human first)")
+    s.add_argument("plan_file")
+    s.add_argument("--start", action="store_true", help="also start the experiment")
+    s.add_argument("--yes", action="store_true")
+    s.set_defaults(fn=cmd_apply)
 
     s = sub.add_parser("smoke", help="drive synthetic users through the real SDK")
     s.add_argument("--flag", required=True)

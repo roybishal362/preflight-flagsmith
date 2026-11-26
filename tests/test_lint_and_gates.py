@@ -156,3 +156,15 @@ def test_pf006_python(tmp_path):
 def test_cloud_api_url_is_not_pf006(tmp_path):
     write(tmp_path, "src/App.tsx", GOOD_JS.replace("enableEvents: true", "enableEvents: true, api: 'https://edge.api.flagsmith.com/api/v1/'"))
     assert lint(tmp_path, {"demo_button_clicked"}) == []
+
+
+def test_strings_and_comments_do_not_count_as_code(tmp_path):
+    # Regression: UI text "Flag read before identify()" used to satisfy the identify() check.
+    write(tmp_path, "src/App.tsx", """
+        // remember to call identify() and set enableEvents: true
+        const TIPS = ['Flag read before identify()', "enableEvents: true"]
+        await flagsmith.init({ environmentID: 'x' })
+        flagsmith.getExperimentFlag('show_demo_button')
+        flagsmith.trackEvent('demo_button_clicked')
+    """)
+    assert {("PF001", "error"), ("PF002", "error")} <= set(rules(lint(tmp_path, {"demo_button_clicked"})))

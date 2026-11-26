@@ -52,6 +52,7 @@ class SourceFile:
         self.lines = self.text.splitlines()
         pattern = JS_CONST if self.lang == "js" else PY_CONST
         self.consts = {m.group(1): m.group(2) for m in pattern.finditer(self.text)}
+        self.code = code_only(self.text, self.lang)  # same length/lines as text; strings and comments blanked
 
     def line_of(self, index: int) -> int:
         return self.text.count("\n", 0, index) + 1
@@ -91,6 +92,61 @@ JS_CUSTOM_API = re.compile(r"\bapi\s*:\s*(?!['\"`]?https://(?:edge\.)?api\.flags
 JS_EVENTS_URL = re.compile(r"\beventsApiUrl\s*:")
 PY_CUSTOM_API = re.compile(r"\bapi_url\s*=\s*(?!['\"]https://(edge\.)?api\.flagsmith\.com)[^,)\n]+")
 PY_EVENTS_URL = re.compile(r"\bevents_api_url\s*=")
+
+
+def code_only(text: str, lang: str) -> str:
+    """Blank out comments and the contents of string literals (keeping quotes, length and newlines), so presence
+    checks like "is identify() ever called?" are not fooled by `'… identify() …'` in UI text or comments."""
+    out = list(text)
+    i, n = 0, len(text)
+    while i < n:
+        ch = text[i]
+        two = text[i:i + 2]
+        three = text[i:i + 3]
+        if lang == "js" and two == "//" or lang == "py" and ch == "#":
+            j = text.find("\n", i)
+            j = n if j == -1 else j
+            for k in range(i, j):
+                out[k] = " "
+            i = j
+        elif lang == "js" and two == "/*":
+            j = text.find("*/", i + 2)
+            j = n if j == -1 else j + 2
+            for k in range(i, j):
+                out[k] = out[k] if text[k] == "\n" else " "
+            i = j
+        elif lang == "py" and three in ('"""', "'''"):
+            j = text.find(three, i + 3)
+            j = n if j == -1 else j + 3
+            for k in range(i + 3, max(i + 3, j - 3)):
+                out[k] = out[k] if text[k] == "\n" else " "
+            i = j
+        elif ch in "'\"" or (lang == "js" and ch == "`"):
+            j = i + 1
+            while j < n and text[j] != ch and not (text[j] == "\n" and ch != "`"):
+                j += 2 if text[j] == "\\" else 1
+            for k in range(i + 1, min(j, n)):
+                out[k] = out[k] if text[k] == "\n" else " "
+            i = j + 1
+        else:
+            i += 1
+    return "".join(out)
+
+
+
+def _in_code(f: "SourceFile", m: re.Match) -> bool:
+    """True if the match starts in real code, not inside a string literal or comment."""
+    s = m.start()
+    return f.code[s] == f.text[s] and not f.text[s].isspace()
+
+
+def _find(rx: re.Pattern, f: "SourceFile") -> list[re.Match]:
+    return [m for m in rx.finditer(f.text) if _in_code(f, m)]
+
+
+def _search(rx: re.Pattern, f: "SourceFile") -> re.Match | None:
+    found = _find(rx, f)
+    return found[0] if found else None
 
 
 def iter_sources(root: Path) -> list[SourceFile]:
@@ -160,14 +216,14 @@ def lint(root: Path, metric_events: set[str] | None = None) -> list[Finding]:
 
     js_files = [f for f in files if f.lang == "js"]
     py_files = [f for f in files if f.lang == "py"]
-    js_events_on = any(JS_EVENTS_ON.search(f.text) for f in js_files)
-    js_identify = any(JS_IDENTIFY.search(f.text) for f in js_files)
+    js_events_on = any(_search(JS_EVENTS_ON, f) for f in js_files)
+    js_identify = any(_search(JS_IDENTIFY, f) for f in js_files)
 
     tracked: list[tuple[str, SourceFile, int]] = []
 
     for f in js_files:
-        reads = list(JS_EXPERIMENT_READ.finditer(f.text))
-        tracks = list(JS_TRACK.finditer(f.text))
+        reads = list(_find(JS_EXPERIMENT_READ, f))
+        tracks = list(_find(JS_TRACK, f))
         for m in tracks:
             name = _resolve(f, m.group(1), m.group(2))
             if name:
@@ -185,36 +241,36 @@ def lint(root: Path, metric_events: set[str] | None = None) -> list[Finding]:
                                         f"`{m.group(1)}('{flag}')` is called but the user is never identified. "
                                         "Exposures are only recorded for identified users.",
                                         "Call `await flagsmith.identify(<stable user or visitor id>)` before reading the flag."))
-        custom = JS_CUSTOM_API.search(f.text)
-        if custom and JS_EVENTS_ON.search(f.text) and not JS_EVENTS_URL.search(f.text):
+        custom = _search(JS_CUSTOM_API, f)
+        if custom and _search(JS_EVENTS_ON, f) and not _search(JS_EVENTS_URL, f):
             findings.append(Finding("PF006", "error", str(f.path), f.line_of(custom.start()),
                                     "Flags come from a custom/self-hosted API, but events still go to Flagsmith Cloud "
                                     "(the SDK's events URL defaults to https://events.api.flagsmith.com/). "
                                     "Your instance will record no exposures or conversions.",
                                     "Also pass `eventsApiUrl: '<your host>/api/'` to init()."))
-        if JS_NODE_CLIENT.search(f.text) and JS_EVENTS_ON.search(f.text) and not JS_FLUSH.search(f.text):
-            m = JS_NODE_CLIENT.search(f.text)
+        if _search(JS_NODE_CLIENT, f) and _search(JS_EVENTS_ON, f) and not _search(JS_FLUSH, f):
+            m = _search(JS_NODE_CLIENT, f)
             findings.append(Finding("PF004", "warning", str(f.path), f.line_of(m.start()),
                                     "Events are batched (every 10 s by default) but this file never flushes or closes the client. "
                                     "A short-lived process can exit before events are sent.",
                                     "Call `await flagsmith.close()` (Node) or `await flagsmith.flushEvents()` before exit."))
 
     for f in py_files:
-        has_client = PY_CLIENT.search(f.text)
-        events_on = PY_EVENTS_ON.search(f.text)
-        for m in PY_TRACK.finditer(f.text):
+        has_client = _search(PY_CLIENT, f)
+        events_on = _search(PY_EVENTS_ON, f)
+        for m in _find(PY_TRACK, f):
             name = _resolve(f, m.group(1), m.group(2))
             if name:
                 tracked.append((name, f, f.line_of(m.start())))
-        calls = list(PY_EXPERIMENT_CALL.finditer(f.text))
-        custom = PY_CUSTOM_API.search(f.text)
-        if has_client and custom and events_on and not PY_EVENTS_URL.search(f.text):
+        calls = list(_find(PY_EXPERIMENT_CALL, f))
+        custom = _search(PY_CUSTOM_API, f)
+        if has_client and custom and events_on and not _search(PY_EVENTS_URL, f):
             findings.append(Finding("PF006", "error", str(f.path), f.line_of(custom.start()),
                                     "Flags come from a custom/self-hosted API, but events still go to Flagsmith Cloud "
                                     "(EventProcessorConfig.events_api_url defaults to https://events.api.flagsmith.com/). "
                                     "Your instance will record no exposures or conversions.",
                                     "Pass event_processor_config=EventProcessorConfig(events_api_url='<your host>/api/')."))
-        if has_client and (calls or PY_TRACK.search(f.text)) and not events_on:
+        if has_client and (calls or _search(PY_TRACK, f)) and not events_on:
             findings.append(Finding("PF001", "error", str(f.path), f.line_of(has_client.start()),
                                     "Flagsmith client is created without `enable_events=True`. "
                                     "Flagsmith will record no exposures and no conversions.",
@@ -225,7 +281,7 @@ def lint(root: Path, metric_events: set[str] | None = None) -> list[Finding]:
                 findings.append(Finding("PF002", "error", str(f.path), f.line_of(m.start()),
                                         "`get_experiment_flag()` is called without an identifier. Exposures need an identity.",
                                         "flagsmith.get_experiment_flag('<flag>', identifier=user_id)"))
-        if has_client and events_on and PY_SCRIPT.search(f.text) and not PY_FLUSH.search(f.text):
+        if has_client and events_on and _search(PY_SCRIPT, f) and not _search(PY_FLUSH, f):
             findings.append(Finding("PF004", "warning", str(f.path), f.line_of(has_client.start()),
                                     "This looks like a short-lived script with events enabled but no flush/close. "
                                     "Buffered events can be lost on exit.",

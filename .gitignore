@@ -8,3 +8,4 @@ __pycache__/
 *.egg-info/
 selfhost/.env
 selfhost/.env.local
+demo_broken/
